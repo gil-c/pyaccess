@@ -1,0 +1,120 @@
+"""Extract declared symbols and their visibility from a Python source."""
+from __future__ import annotations
+
+import ast
+from dataclasses import dataclass
+
+from pyaccess.markers import Visibility, get_visibility_name
+
+
+@dataclass(frozen=True)
+class Symbol:
+    name: str
+    qualname: str
+    module: str
+    kind: str  # "function" | "class" | "method"
+    visibility: Visibility | None
+    lineno: int
+    col_offset: int
+
+
+def _decorator_name(node: ast.expr) -> str:
+    """Best-effort dotted name extraction for a decorator expression."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return f"{_decorator_name(node.value)}.{node.attr}"
+    if isinstance(node, ast.Call):
+        return _decorator_name(node.func)
+    return ""
+
+
+def _visibility_from_decorators(
+    decorators: list, alias_to_visibility: dict[str, Visibility]
+) -> Visibility | None:
+    for dec in decorators:
+        # Resolve via aliasing (e.g. `from pyaccess import internal as _hidden`)
+        name = _decorator_name(dec)
+        if not name:
+            continue
+        head = name.split(".", 1)[0]
+        if head in alias_to_visibility and "." not in name:
+            return alias_to_visibility[head]
+        v = get_visibility_name(name)
+        if v is not None:
+            return Visibility(v)
+    return None
+
+
+def _collect_visibility_aliases(tree: ast.AST) -> dict[str, Visibility]:
+    """Find ``from pyaccess import internal as X`` style aliases."""
+    aliases: dict[str, Visibility] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("pyaccess"):
+            for alias in node.names:
+                v = get_visibility_name(alias.name)
+                if v is not None:
+                    aliases[alias.asname or alias.name] = Visibility(v)
+        elif isinstance(node, ast.Import):
+            # `import pyaccess` -> use `pyaccess.internal` (already handled by get_visibility_name)
+            pass
+    return aliases
+
+
+def collect_symbols(source: str, module: str) -> list[Symbol]:
+    """Parse ``source`` and return the list of declared symbols."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    aliases = _collect_visibility_aliases(tree)
+    symbols: list[Symbol] = []
+
+    def visit_class(cls: ast.ClassDef, qual_prefix: str) -> None:
+        qual = f"{qual_prefix}{cls.name}" if qual_prefix else cls.name
+        symbols.append(
+            Symbol(
+                name=cls.name,
+                qualname=qual,
+                module=module,
+                kind="class",
+                visibility=_visibility_from_decorators(cls.decorator_list, aliases),
+                lineno=cls.lineno,
+                col_offset=cls.col_offset,
+            )
+        )
+        for child in cls.body:
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                symbols.append(
+                    Symbol(
+                        name=child.name,
+                        qualname=f"{qual}.{child.name}",
+                        module=module,
+                        kind="method",
+                        visibility=_visibility_from_decorators(child.decorator_list, aliases),
+                        lineno=child.lineno,
+                        col_offset=child.col_offset,
+                    )
+                )
+            elif isinstance(child, ast.ClassDef):
+                visit_class(child, qual + ".")
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            symbols.append(
+                Symbol(
+                    name=node.name,
+                    qualname=node.name,
+                    module=module,
+                    kind="function",
+                    visibility=_visibility_from_decorators(node.decorator_list, aliases),
+                    lineno=node.lineno,
+                    col_offset=node.col_offset,
+                )
+            )
+        elif isinstance(node, ast.ClassDef):
+            visit_class(node, "")
+
+    return symbols
+
