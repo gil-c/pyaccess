@@ -179,3 +179,108 @@ def test_module_marker_suppresses_all_diagnostics_in_file():
 
 def test_syntax_error_yields_no_diagnostics_but_does_not_raise():
     assert _codes("def broken(:\n") == []
+
+
+# --- PA015: direct __dict__ manipulation ------------------------------------
+
+
+def test_dict_subscript_assignment_is_flagged():
+    assert _codes("obj.__dict__['x'] = 1\n") == ["PA015"]
+
+
+def test_dict_whole_reassignment_is_flagged():
+    assert _codes("obj.__dict__ = {}\n") == ["PA015"]
+
+
+def test_dict_update_call_is_flagged():
+    assert _codes("obj.__dict__.update({'x': 1})\n") == ["PA015"]
+
+
+def test_dict_pop_call_is_flagged():
+    assert _codes("obj.__dict__.pop('x')\n") == ["PA015"]
+
+
+def test_plain_attribute_assignment_is_not_flagged_as_dict_manipulation():
+    assert _codes("obj.x = 1\n") == []
+
+
+def test_dict_read_access_is_not_flagged():
+    assert _codes("x = obj.__dict__\n") == []
+
+
+def test_dict_get_is_not_flagged():
+    # Read-only helper method — not a mutator.
+    assert _codes("x = obj.__dict__.get('a')\n") == []
+
+
+# --- PA016: frame introspection ----------------------------------------------
+
+
+def test_inspect_currentframe_is_flagged():
+    assert _codes("import inspect\ninspect.currentframe()\n") == ["PA016"]
+
+
+def test_inspect_stack_is_flagged():
+    assert _codes("import inspect\ninspect.stack()\n") == ["PA016"]
+
+
+def test_sys_getframe_is_flagged():
+    assert _codes("import sys\nsys._getframe()\n") == ["PA016"]
+
+
+def test_aliased_inspect_import_is_recognised():
+    assert _codes("import inspect as insp\ninsp.currentframe()\n") == ["PA016"]
+
+
+def test_from_import_currentframe_is_recognised():
+    assert _codes("from inspect import currentframe\ncurrentframe()\n") == ["PA016"]
+
+
+def test_unrelated_currentframe_call_is_not_flagged():
+    # Some other object happening to expose a same-named method is fine —
+    # only calls resolved back to the real ``inspect``/``sys`` modules count.
+    assert _codes("obj.currentframe()\n") == []
+
+
+# --- PA017: monkey-patching ---------------------------------------------------
+
+
+def test_assigning_attribute_of_imported_module_is_flagged():
+    assert _codes("import os\nos.path = None\n") == ["PA017"]
+
+
+def test_assigning_attribute_of_from_imported_name_is_flagged():
+    assert _codes("from mypkg import Service\nService.run = lambda self: None\n") == ["PA017"]
+
+
+def test_self_attribute_assignment_is_not_flagged():
+    src = "class Foo:\n    def __init__(self):\n        self.x = 1\n"
+    assert _codes(src) == []
+
+
+def test_cls_attribute_assignment_is_not_flagged():
+    src = "class Foo:\n    @classmethod\n    def configure(cls):\n        cls.x = 1\n"
+    assert _codes(src) == []
+
+
+def test_local_variable_attribute_assignment_is_not_flagged():
+    src = "obj = make_thing()\nobj.x = 1\n"
+    assert _codes(src) == []
+
+
+# --- Escape hatches also cover the new rules ---------------------------------
+
+
+def test_inline_marker_suppresses_dict_mutation():
+    assert _codes("obj.__dict__['x'] = 1  # pyaccess: allow-dynamic\n") == []
+
+
+def test_module_marker_suppresses_monkeypatch_and_frame_introspection():
+    src = (
+        "# pyaccess: dynamic-module\n"
+        "import os\n"
+        "import inspect\n"
+        "os.path = None\n"
+        "inspect.currentframe()\n"
+    )
+    assert _codes(src) == []

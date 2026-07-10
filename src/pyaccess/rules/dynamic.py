@@ -26,9 +26,14 @@ PA011 = "PA011"  # eval / exec / compile
 PA012 = "PA012"  # importlib.import_module / __import__ with a non-literal target
 PA013 = "PA013"  # module-level __getattr__ / __getattribute__
 PA014 = "PA014"  # explicit custom metaclass
+PA015 = "PA015"  # direct __dict__ mutation
+PA016 = "PA016"  # frame introspection (inspect.currentframe/stack, sys._getframe)
+PA017 = "PA017"  # monkey-patching an attribute of an imported name
 
 _ATTR_BUILTINS = {"getattr", "setattr", "hasattr", "delattr"}
 _EXEC_BUILTINS = {"eval", "exec", "compile"}
+_DICT_MUTATORS = {"update", "pop", "popitem", "setdefault", "clear", "__setitem__", "__delitem__"}
+_FRAME_INTROSPECTORS = {"inspect.currentframe", "inspect.stack", "inspect.trace", "sys._getframe"}
 _INLINE_MARKER = "pyaccess: allow-dynamic"
 _MODULE_MARKER = "pyaccess: dynamic-module"
 _MODULE_MARKER_SCAN_LINES = 20
@@ -98,6 +103,56 @@ def _positional_or_keyword(call: ast.Call, index: int, keyword: str) -> ast.expr
     return None
 
 
+def _is_dunder_dict(node: ast.expr) -> bool:
+    return isinstance(node, ast.Attribute) and node.attr == "__dict__"
+
+
+def _leftmost_name(node: ast.expr) -> str | None:
+    """Walk down an attribute/subscript chain to the base ``Name``, if any."""
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+def _collect_imported_names(tree: ast.AST) -> set[str]:
+    """Top-level names bound by ``import``/``from ... import`` in this file."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    names.add(alias.asname or alias.name)
+    return names
+
+
+def _collect_module_aliases(tree: ast.AST) -> dict[str, str]:
+    """``import X [as Y]`` -> ``{local_name: "X"}`` (dotted names kept whole)."""
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                aliases[alias.asname or alias.name.split(".", 1)[0]] = alias.name
+    return aliases
+
+
+def _collect_from_aliases(tree: ast.AST) -> dict[str, tuple[str, str]]:
+    """``from X import Y [as Z]`` -> ``{local_name: ("X", "Y")}``."""
+    aliases: dict[str, tuple[str, str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                if alias.name != "*":
+                    aliases[alias.asname or alias.name] = (node.module, alias.name)
+    return aliases
+
+
+def _assignment_targets(node: ast.Assign | ast.AugAssign) -> list[ast.expr]:
+    return node.targets if isinstance(node, ast.Assign) else [node.target]
+
+
 def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: ARG001
     """Scan a single file's source for dynamic constructs.
 
@@ -115,6 +170,9 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
     aliases = _collect_dynamic_aliases(tree)
     allowed_lines = _inline_allowed_lines(source)
     dynamic_ranges = _dynamic_decorated_ranges(tree, aliases)
+    imported_names = _collect_imported_names(tree)
+    module_aliases = _collect_module_aliases(tree)
+    from_aliases = _collect_from_aliases(tree)
 
     def is_suppressed(lineno: int) -> bool:
         if lineno in allowed_lines:
@@ -183,6 +241,43 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                         node,
                     )
 
+            elif isinstance(node.func, ast.Attribute) and _is_dunder_dict(node.func.value):
+                if node.func.attr in _DICT_MUTATORS:
+                    emit(
+                        PA015,
+                        f"'.__dict__.{node.func.attr}()' mutates an object's "
+                        "namespace directly, bypassing declared visibility.",
+                        node,
+                    )
+
+            elif isinstance(node.func, ast.Attribute):
+                base = _leftmost_name(node.func.value)
+                real_module = module_aliases.get(base) if base else None
+                if (real_module == "inspect" and node.func.attr in ("currentframe", "stack", "trace")) or (
+                    real_module == "sys" and node.func.attr == "_getframe"
+                ):
+                    emit(
+                        PA016,
+                        f"'{func_name}()' inspects call-stack frames, which "
+                        "escapes static analysis.",
+                        node,
+                    )
+
+            elif isinstance(node.func, ast.Name):
+                mapped = from_aliases.get(node.func.id)
+                if mapped in {
+                    ("inspect", "currentframe"),
+                    ("inspect", "stack"),
+                    ("inspect", "trace"),
+                    ("sys", "_getframe"),
+                }:
+                    emit(
+                        PA016,
+                        f"'{node.func.id}()' inspects call-stack frames, which "
+                        "escapes static analysis.",
+                        node,
+                    )
+
         elif isinstance(node, ast.Module):
             for stmt in node.body:
                 if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name in (
@@ -206,6 +301,32 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                         node,
                         severity="warning",
                     )
+
+        elif isinstance(node, (ast.Assign, ast.AugAssign)):
+            for target in _assignment_targets(node):
+                if isinstance(target, ast.Subscript) and _is_dunder_dict(target.value):
+                    emit(
+                        PA015,
+                        "subscript assignment into '__dict__' mutates an "
+                        "object's namespace directly, bypassing declared visibility.",
+                        node,
+                    )
+                elif isinstance(target, ast.Attribute) and target.attr == "__dict__":
+                    emit(
+                        PA015,
+                        "direct reassignment of '__dict__' replaces an "
+                        "object's whole namespace, bypassing declared visibility.",
+                        node,
+                    )
+                elif isinstance(target, ast.Attribute):
+                    base = _leftmost_name(target)
+                    if base and base in imported_names and base not in ("self", "cls"):
+                        emit(
+                            PA017,
+                            f"assigning to '{base}.{target.attr}' monkey-patches "
+                            f"an attribute of the imported name '{base}'.",
+                            node,
+                        )
 
     diagnostics.sort(key=lambda d: (d.line, d.column, d.code))
     return diagnostics
