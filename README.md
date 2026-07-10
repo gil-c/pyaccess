@@ -7,8 +7,6 @@ This repository currently hosts a Phase 1 POC that demonstrates the core idea:
 
 > Detect a cross-package import of a symbol marked `@internal`.
 
-See [`pyaccess-roadmap.md`](./pyaccess-roadmap.md) for the full vision and roadmap.
-
 ## Quickstart
 
 ```bash
