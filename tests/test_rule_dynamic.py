@@ -268,6 +268,48 @@ def test_local_variable_attribute_assignment_is_not_flagged():
     assert _codes(src) == []
 
 
+# --- PA018: globals()/locals()/vars() write access --------------------------
+
+
+def test_globals_subscript_assignment_is_flagged():
+    assert _codes("globals()['x'] = 1\n") == ["PA018"]
+
+
+def test_locals_subscript_assignment_is_flagged():
+    assert _codes("locals()['x'] = 1\n") == ["PA018"]
+
+
+def test_vars_subscript_assignment_is_flagged():
+    assert _codes("vars()['x'] = 1\n") == ["PA018"]
+
+
+def test_globals_subscript_delete_is_flagged():
+    assert _codes("del globals()['x']\n") == ["PA018"]
+
+
+def test_globals_update_call_is_flagged():
+    assert _codes("globals().update({'x': 1})\n") == ["PA018"]
+
+
+def test_globals_pop_call_is_flagged():
+    assert _codes("globals().pop('x')\n") == ["PA018"]
+
+
+def test_globals_read_access_is_not_flagged():
+    assert _codes("x = globals()['x']\n") == []
+    assert _codes("x = globals().get('x')\n") == []
+    assert _codes("print(globals())\n") == []
+
+
+def test_vars_of_object_read_access_is_not_flagged():
+    # `vars(obj)` (reading another object's namespace) is a read, not a write.
+    assert _codes("x = vars(obj)\n") == []
+
+
+def test_globals_write_suppressed_by_inline_marker():
+    assert _codes("globals()['x'] = 1  # pyaccess: allow-dynamic\n") == []
+
+
 # --- Escape hatches also cover the new rules ---------------------------------
 
 

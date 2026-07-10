@@ -29,10 +29,12 @@ PA014 = "PA014"  # explicit custom metaclass
 PA015 = "PA015"  # direct __dict__ mutation
 PA016 = "PA016"  # frame introspection (inspect.currentframe/stack, sys._getframe)
 PA017 = "PA017"  # monkey-patching an attribute of an imported name
+PA018 = "PA018"  # globals()/locals()/vars() used for a write, not a read
 
 _ATTR_BUILTINS = {"getattr", "setattr", "hasattr", "delattr"}
 _EXEC_BUILTINS = {"eval", "exec", "compile"}
 _DICT_MUTATORS = {"update", "pop", "popitem", "setdefault", "clear", "__setitem__", "__delitem__"}
+_NAMESPACE_BUILTINS = {"globals", "locals", "vars"}
 _FRAME_INTROSPECTORS = {"inspect.currentframe", "inspect.stack", "inspect.trace", "sys._getframe"}
 _INLINE_MARKER = "pyaccess: allow-dynamic"
 _MODULE_MARKER = "pyaccess: dynamic-module"
@@ -105,6 +107,17 @@ def _positional_or_keyword(call: ast.Call, index: int, keyword: str) -> ast.expr
 
 def _is_dunder_dict(node: ast.expr) -> bool:
     return isinstance(node, ast.Attribute) and node.attr == "__dict__"
+
+
+def _namespace_builtin_call(node: ast.expr) -> str | None:
+    """Return ``"globals"``/``"locals"``/``"vars"`` if ``node`` calls that builtin."""
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in _NAMESPACE_BUILTINS
+    ):
+        return node.func.id
+    return None
 
 
 def _leftmost_name(node: ast.expr) -> str | None:
@@ -250,6 +263,16 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                         node,
                     )
 
+            elif isinstance(node.func, ast.Attribute) and node.func.attr in _DICT_MUTATORS:
+                builtin_name = _namespace_builtin_call(node.func.value)
+                if builtin_name is not None:
+                    emit(
+                        PA018,
+                        f"'{builtin_name}().{node.func.attr}()' mutates the "
+                        "namespace dict directly, bypassing declared visibility.",
+                        node,
+                    )
+
             elif isinstance(node.func, ast.Attribute):
                 base = _leftmost_name(node.func.value)
                 real_module = module_aliases.get(base) if base else None
@@ -318,6 +341,15 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                         "object's whole namespace, bypassing declared visibility.",
                         node,
                     )
+                elif isinstance(target, ast.Subscript):
+                    builtin_name = _namespace_builtin_call(target.value)
+                    if builtin_name is not None:
+                        emit(
+                            PA018,
+                            f"subscript assignment into '{builtin_name}()' mutates "
+                            "the namespace dict directly, bypassing declared visibility.",
+                            node,
+                        )
                 elif isinstance(target, ast.Attribute):
                     base = _leftmost_name(target)
                     if base and base in imported_names and base not in ("self", "cls"):
@@ -325,6 +357,18 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                             PA017,
                             f"assigning to '{base}.{target.attr}' monkey-patches "
                             f"an attribute of the imported name '{base}'.",
+                            node,
+                        )
+
+        elif isinstance(node, ast.Delete):
+            for target in node.targets:
+                if isinstance(target, ast.Subscript):
+                    builtin_name = _namespace_builtin_call(target.value)
+                    if builtin_name is not None:
+                        emit(
+                            PA018,
+                            f"'del {builtin_name}()[...]' mutates the namespace "
+                            "dict directly, bypassing declared visibility.",
                             node,
                         )
 
