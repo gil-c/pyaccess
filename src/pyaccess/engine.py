@@ -18,6 +18,7 @@ from pyaccess.discovery import discover_python_files
 from pyaccess.imports import ImportRef, collect_imports
 from pyaccess.modules import module_name_for
 from pyaccess.rules import access as access_rule
+from pyaccess.rules import dynamic as dynamic_rule
 from pyaccess.rules import private as private_rule
 from pyaccess.symbols import Symbol, collect_symbols
 
@@ -31,6 +32,8 @@ class ProjectIndex:
     modules_by_file: dict[Path, str] = field(default_factory=dict)
     symbols_by_module: dict[str, dict[str, Symbol]] = field(default_factory=dict)
     imports_by_module: dict[str, list[ImportRef]] = field(default_factory=dict)
+    # Per-file diagnostics from rules that only need one file's AST (PA01x).
+    dynamic_diagnostics_by_module: dict[str, list[Diagnostic]] = field(default_factory=dict)
 
 
 def _top_level_symbol_index(symbols: list[Symbol]) -> dict[str, Symbol]:
@@ -66,6 +69,7 @@ def build_index(root: Path) -> ProjectIndex:
         top_level, imports = _parse_file(source, module)
         index.symbols_by_module[module] = top_level
         index.imports_by_module[module] = imports
+        index.dynamic_diagnostics_by_module[module] = dynamic_rule.check(source, module, file)
     return index
 
 
@@ -73,10 +77,13 @@ def _run_rules(
     imports: list[ImportRef],
     symbols_by_module: Mapping[str, Mapping[str, Symbol]],
     files_by_module: Mapping[str, Path],
+    dynamic_diagnostics_by_module: Mapping[str, list[Diagnostic]],
 ) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     diagnostics.extend(access_rule.check(imports, symbols_by_module, files_by_module))
     diagnostics.extend(private_rule.check(imports, symbols_by_module, files_by_module))
+    for diags in dynamic_diagnostics_by_module.values():
+        diagnostics.extend(diags)
     return diagnostics
 
 
@@ -86,7 +93,12 @@ def check_project(root: Path) -> list[Diagnostic]:
     all_imports: list[ImportRef] = []
     for refs in index.imports_by_module.values():
         all_imports.extend(refs)
-    return _run_rules(all_imports, index.symbols_by_module, index.files_by_module)
+    return _run_rules(
+        all_imports,
+        index.symbols_by_module,
+        index.files_by_module,
+        index.dynamic_diagnostics_by_module,
+    )
 
 
 def check_source(
@@ -118,11 +130,17 @@ def check_source(
     # Update the live index so cross-file checks see the latest version.
     index.symbols_by_module[module] = top_level
     index.imports_by_module[module] = imports
+    index.dynamic_diagnostics_by_module[module] = dynamic_rule.check(source, module, file_path)
 
     all_imports: list[ImportRef] = []
     for refs in index.imports_by_module.values():
         all_imports.extend(refs)
-    diagnostics = _run_rules(all_imports, index.symbols_by_module, index.files_by_module)
+    diagnostics = _run_rules(
+        all_imports,
+        index.symbols_by_module,
+        index.files_by_module,
+        index.dynamic_diagnostics_by_module,
+    )
     return [d for d in diagnostics if d.file == file_path]
 
 
