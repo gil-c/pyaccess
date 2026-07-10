@@ -167,4 +167,55 @@ def test_explicit_public_decorator_overrides_strict_default_policy(tmp_path: Pat
     assert [d for d in diagnostics if d.code == "PA001"] == []
 
 
+# --- Phase 3: Annotated[T, Marker] attributes -----------------------------------
+
+
+def test_annotated_internal_attribute_cross_package_import_is_flagged(tmp_path: Path):
+    _write(tmp_path, "alpha/__init__.py", "")
+    _write(
+        tmp_path,
+        "alpha/core.py",
+        "from typing import Annotated\n"
+        "from pyaccess import Internal\n"
+        "CONFIG: Annotated[dict, Internal] = {}\n",
+    )
+    _write(tmp_path, "beta/__init__.py", "")
+    _write(tmp_path, "beta/user.py", "from alpha.core import CONFIG\n")
+
+    diagnostics = check_project(tmp_path)
+    codes = [d.code for d in diagnostics]
+    assert "PA001" in codes
+
+
+def test_annotated_private_attribute_cross_module_import_is_flagged(tmp_path: Path):
+    _write(tmp_path, "alpha/__init__.py", "")
+    _write(
+        tmp_path,
+        "alpha/core.py",
+        "from typing import Annotated\n"
+        "from pyaccess import Private\n"
+        "_secret: Annotated[str, Private] = ''\n",
+    )
+    _write(tmp_path, "alpha/user.py", "from alpha.core import _secret\n")
+
+    diagnostics = check_project(tmp_path)
+    assert "PA002" in [d.code for d in diagnostics]
+
+
+def test_annotated_public_attribute_is_importable_cross_package(tmp_path: Path):
+    _write(tmp_path, "alpha/__init__.py", "")
+    _write(
+        tmp_path,
+        "alpha/core.py",
+        "from typing import Annotated\n"
+        "from pyaccess import Public\n"
+        "API_VERSION: Annotated[str, Public] = '1.0'\n",
+    )
+    _write(tmp_path, "beta/__init__.py", "")
+    _write(tmp_path, "beta/user.py", "from alpha.core import API_VERSION\n")
+
+    diagnostics = check_project(tmp_path)
+    assert [d for d in diagnostics if d.code == "PA001"] == []
+
+
 
