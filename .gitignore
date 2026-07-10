@@ -1,0 +1,39 @@
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Test & lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+
+# LSP / debug
+lsp.log
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-local artifacts intentionally kept out of version control
+AGENTS.md
+pyaccess-roadmap.md
+demos/
