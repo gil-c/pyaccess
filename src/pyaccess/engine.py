@@ -10,12 +10,14 @@ Two entry points are exposed:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from pyaccess.config import PyAccessConfig, load_config
 from pyaccess.diagnostics import Diagnostic
 from pyaccess.discovery import discover_python_files
 from pyaccess.imports import ImportRef, collect_imports
+from pyaccess.markers import Visibility
 from pyaccess.modules import module_name_for
 from pyaccess.reexports import compute_reexports
 from pyaccess.rules import access as access_rule
@@ -35,27 +37,35 @@ class ProjectIndex:
     imports_by_module: dict[str, list[ImportRef]] = field(default_factory=dict)
     # Per-file diagnostics from rules that only need one file's AST (PA01x).
     dynamic_diagnostics_by_module: dict[str, list[Diagnostic]] = field(default_factory=dict)
+    # Visibility assumed for undecorated symbols (see pyaccess.config).
+    default_visibility: Visibility = Visibility.PUBLIC
 
 
-def _top_level_symbol_index(symbols: list[Symbol]) -> dict[str, Symbol]:
+def _top_level_symbol_index(symbols: list[Symbol], default_visibility: Visibility) -> dict[str, Symbol]:
     """Keep only module-scope symbols (those addressable by ``from mod import X``)."""
     top_level: dict[str, Symbol] = {}
     for s in symbols:
         if s.kind in ("function", "class") and "." not in s.qualname:
+            if s.visibility is None:
+                s = replace(s, visibility=default_visibility)
             top_level[s.name] = s
     return top_level
 
 
-def _parse_file(source: str, module: str) -> tuple[dict[str, Symbol], list[ImportRef]]:
+def _parse_file(
+    source: str, module: str, default_visibility: Visibility
+) -> tuple[dict[str, Symbol], list[ImportRef]]:
     symbols = collect_symbols(source, module=module)
     imports = collect_imports(source, module=module)
-    return _top_level_symbol_index(symbols), imports
+    return _top_level_symbol_index(symbols, default_visibility), imports
 
 
-def build_index(root: Path) -> ProjectIndex:
+def build_index(root: Path, config: PyAccessConfig | None = None) -> ProjectIndex:
     """Scan ``root``, parse every file once, return a reusable index."""
     root = Path(root).resolve()
-    index = ProjectIndex(root=root)
+    if config is None:
+        config = load_config(root)
+    index = ProjectIndex(root=root, default_visibility=config.default_visibility)
     for file in discover_python_files(root):
         module = module_name_for(file, root)
         if module is None:
@@ -67,7 +77,7 @@ def build_index(root: Path) -> ProjectIndex:
             source = file.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        top_level, imports = _parse_file(source, module)
+        top_level, imports = _parse_file(source, module, index.default_visibility)
         index.symbols_by_module[module] = top_level
         index.imports_by_module[module] = imports
         index.dynamic_diagnostics_by_module[module] = dynamic_rule.check(source, module, file)
@@ -149,7 +159,7 @@ def check_source(
         except (OSError, UnicodeDecodeError):
             return []
 
-    top_level, imports = _parse_file(source, module)
+    top_level, imports = _parse_file(source, module, index.default_visibility)
     # Update the live index so cross-file checks see the latest version.
     index.symbols_by_module[module] = top_level
     index.imports_by_module[module] = imports

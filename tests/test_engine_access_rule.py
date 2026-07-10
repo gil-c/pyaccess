@@ -128,3 +128,43 @@ def test_private_symbol_cannot_be_reexported(tmp_path: Path):
     assert "PA002" in [d.code for d in diagnostics]
 
 
+# --- Phase 3: configurable default_visibility policy --------------------------
+
+
+def test_undecorated_symbol_is_public_by_default(tmp_path: Path):
+    _write(tmp_path, "alpha/__init__.py", "")
+    _write(tmp_path, "alpha/core.py", "def helper():\n    pass\n")
+    _write(tmp_path, "beta/__init__.py", "")
+    _write(tmp_path, "beta/user.py", "from alpha.core import helper\n")
+
+    diagnostics = check_project(tmp_path)
+    assert [d for d in diagnostics if d.code == "PA001"] == []
+
+
+def test_undecorated_symbol_is_internal_with_strict_default_policy(tmp_path: Path):
+    _write(tmp_path, "pyaccess.toml", 'default_visibility = "internal"\n')
+    _write(tmp_path, "alpha/__init__.py", "")
+    _write(tmp_path, "alpha/core.py", "def helper():\n    pass\n")
+    _write(tmp_path, "beta/__init__.py", "")
+    _write(tmp_path, "beta/user.py", "from alpha.core import helper\n")
+
+    diagnostics = check_project(tmp_path)
+    assert "PA001" in [d.code for d in diagnostics]
+
+
+def test_explicit_public_decorator_overrides_strict_default_policy(tmp_path: Path):
+    _write(tmp_path, "pyaccess.toml", 'default_visibility = "internal"\n')
+    _write(tmp_path, "alpha/__init__.py", "")
+    _write(
+        tmp_path,
+        "alpha/core.py",
+        "from pyaccess import public\n@public\ndef helper():\n    pass\n",
+    )
+    _write(tmp_path, "beta/__init__.py", "")
+    _write(tmp_path, "beta/user.py", "from alpha.core import helper\n")
+
+    diagnostics = check_project(tmp_path)
+    assert [d for d in diagnostics if d.code == "PA001"] == []
+
+
+
