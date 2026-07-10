@@ -81,3 +81,50 @@ def test_unknown_external_symbol_is_ignored(tmp_path: Path):
     diagnostics = check_project(tmp_path)
     assert diagnostics == []
 
+
+# --- Phase 3: re-exports via __init__.py --------------------------------------
+
+
+def test_internal_symbol_reexported_via_init_is_importable_cross_package(tmp_path: Path):
+    _write(tmp_path, "alpha/__init__.py", "from alpha.core import helper\n")
+    _write(
+        tmp_path,
+        "alpha/core.py",
+        "from pyaccess import internal\n@internal\ndef helper():\n    pass\n",
+    )
+    _write(tmp_path, "beta/__init__.py", "")
+    _write(tmp_path, "beta/user.py", "from alpha import helper\n")
+
+    diagnostics = check_project(tmp_path)
+    assert [d for d in diagnostics if d.code == "PA001"] == []
+
+
+def test_direct_import_bypassing_reexport_is_still_flagged(tmp_path: Path):
+    # The re-export promotes `alpha.helper`, not the original `alpha.core.helper`.
+    _write(tmp_path, "alpha/__init__.py", "from alpha.core import helper\n")
+    _write(
+        tmp_path,
+        "alpha/core.py",
+        "from pyaccess import internal\n@internal\ndef helper():\n    pass\n",
+    )
+    _write(tmp_path, "beta/__init__.py", "")
+    _write(tmp_path, "beta/user.py", "from alpha.core import helper\n")
+
+    diagnostics = check_project(tmp_path)
+    assert "PA001" in [d.code for d in diagnostics]
+
+
+def test_private_symbol_cannot_be_reexported(tmp_path: Path):
+    # The __init__.py's own import of a @private symbol from another module
+    # is itself a PA002 violation — re-exporting it must not be possible.
+    _write(tmp_path, "alpha/__init__.py", "from alpha.core import _secret\n")
+    _write(
+        tmp_path,
+        "alpha/core.py",
+        "from pyaccess import private\n@private\ndef _secret():\n    pass\n",
+    )
+
+    diagnostics = check_project(tmp_path)
+    assert "PA002" in [d.code for d in diagnostics]
+
+

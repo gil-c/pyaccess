@@ -17,6 +17,7 @@ from pyaccess.diagnostics import Diagnostic
 from pyaccess.discovery import discover_python_files
 from pyaccess.imports import ImportRef, collect_imports
 from pyaccess.modules import module_name_for
+from pyaccess.reexports import compute_reexports
 from pyaccess.rules import access as access_rule
 from pyaccess.rules import dynamic as dynamic_rule
 from pyaccess.rules import private as private_rule
@@ -73,6 +74,25 @@ def build_index(root: Path) -> ProjectIndex:
     return index
 
 
+def _with_reexports(
+    symbols_by_module: Mapping[str, Mapping[str, Symbol]],
+    imports_by_module: Mapping[str, list[ImportRef]],
+    files_by_module: Mapping[str, Path],
+) -> dict[str, dict[str, Symbol]]:
+    """Overlay symbols promoted by ``__init__.py`` re-exports (Phase 3).
+
+    Computed fresh each time rather than mutated into the index, so a stale
+    promotion never lingers across incremental LSP re-checks.
+    """
+    promoted = compute_reexports(imports_by_module, symbols_by_module, files_by_module)
+    if not promoted:
+        return {module: dict(symbols) for module, symbols in symbols_by_module.items()}
+    combined = {module: dict(symbols) for module, symbols in symbols_by_module.items()}
+    for module, symbols in promoted.items():
+        combined.setdefault(module, {}).update(symbols)
+    return combined
+
+
 def _run_rules(
     imports: list[ImportRef],
     symbols_by_module: Mapping[str, Mapping[str, Symbol]],
@@ -93,9 +113,12 @@ def check_project(root: Path) -> list[Diagnostic]:
     all_imports: list[ImportRef] = []
     for refs in index.imports_by_module.values():
         all_imports.extend(refs)
+    combined_symbols = _with_reexports(
+        index.symbols_by_module, index.imports_by_module, index.files_by_module
+    )
     return _run_rules(
         all_imports,
-        index.symbols_by_module,
+        combined_symbols,
         index.files_by_module,
         index.dynamic_diagnostics_by_module,
     )
@@ -135,9 +158,12 @@ def check_source(
     all_imports: list[ImportRef] = []
     for refs in index.imports_by_module.values():
         all_imports.extend(refs)
+    combined_symbols = _with_reexports(
+        index.symbols_by_module, index.imports_by_module, index.files_by_module
+    )
     diagnostics = _run_rules(
         all_imports,
-        index.symbols_by_module,
+        combined_symbols,
         index.files_by_module,
         index.dynamic_diagnostics_by_module,
     )
