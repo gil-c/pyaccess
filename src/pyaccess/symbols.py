@@ -18,15 +18,19 @@ class Symbol:
     col_offset: int
 
 
-def _decorator_name(node: ast.expr) -> str:
-    """Best-effort dotted name extraction for a decorator expression."""
+def _dotted_name(node: ast.expr) -> str:
+    """Best-effort dotted name extraction for a decorator/annotation expression."""
     if isinstance(node, ast.Name):
         return node.id
     if isinstance(node, ast.Attribute):
-        return f"{_decorator_name(node.value)}.{node.attr}"
+        return f"{_dotted_name(node.value)}.{node.attr}"
     if isinstance(node, ast.Call):
-        return _decorator_name(node.func)
+        return _dotted_name(node.func)
     return ""
+
+
+# Kept as an alias: historically decorator-only, now shared with Annotated metadata.
+_decorator_name = _dotted_name
 
 
 def _visibility_from_decorators(
@@ -35,6 +39,39 @@ def _visibility_from_decorators(
     for dec in decorators:
         # Resolve via aliasing (e.g. `from pyaccess import internal as _hidden`)
         name = _decorator_name(dec)
+        if not name:
+            continue
+        head = name.split(".", 1)[0]
+        if head in alias_to_visibility and "." not in name:
+            return alias_to_visibility[head]
+        v = get_visibility_name(name)
+        if v is not None:
+            return Visibility(v)
+    return None
+
+
+def _is_annotated_subscript(node: ast.expr) -> bool:
+    if not isinstance(node, ast.Subscript):
+        return False
+    tail = _dotted_name(node.value).rsplit(".", 1)[-1]
+    return tail == "Annotated"
+
+
+def _annotated_metadata(node: ast.Subscript) -> list[ast.expr]:
+    """Everything after the wrapped type in ``Annotated[T, meta1, meta2, ...]``."""
+    sl = node.slice
+    elts = sl.elts if isinstance(sl, ast.Tuple) else [sl]
+    return elts[1:]
+
+
+def _visibility_from_annotation(
+    annotation: ast.expr | None, alias_to_visibility: dict[str, Visibility]
+) -> Visibility | None:
+    """Visibility carried by ``Annotated[T, Internal]`` (or ``Public``/``Private``)."""
+    if annotation is None or not _is_annotated_subscript(annotation):
+        return None
+    for meta in _annotated_metadata(annotation):
+        name = _dotted_name(meta)
         if not name:
             continue
         head = name.split(".", 1)[0]
@@ -99,6 +136,18 @@ def collect_symbols(source: str, module: str) -> list[Symbol]:
                 )
             elif isinstance(child, ast.ClassDef):
                 visit_class(child, qual + ".")
+            elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+                symbols.append(
+                    Symbol(
+                        name=child.target.id,
+                        qualname=f"{qual}.{child.target.id}",
+                        module=module,
+                        kind="attribute",
+                        visibility=_visibility_from_annotation(child.annotation, aliases),
+                        lineno=child.lineno,
+                        col_offset=child.col_offset,
+                    )
+                )
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -115,6 +164,18 @@ def collect_symbols(source: str, module: str) -> list[Symbol]:
             )
         elif isinstance(node, ast.ClassDef):
             visit_class(node, "")
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            symbols.append(
+                Symbol(
+                    name=node.target.id,
+                    qualname=node.target.id,
+                    module=module,
+                    kind="attribute",
+                    visibility=_visibility_from_annotation(node.annotation, aliases),
+                    lineno=node.lineno,
+                    col_offset=node.col_offset,
+                )
+            )
 
     return symbols
 

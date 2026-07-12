@@ -45,7 +45,7 @@ def _top_level_symbol_index(symbols: list[Symbol], default_visibility: Visibilit
     """Keep only module-scope symbols (those addressable by ``from mod import X``)."""
     top_level: dict[str, Symbol] = {}
     for s in symbols:
-        if s.kind in ("function", "class") and "." not in s.qualname:
+        if s.kind in ("function", "class", "attribute") and "." not in s.qualname:
             if s.visibility is None:
                 s = replace(s, visibility=default_visibility)
             top_level[s.name] = s

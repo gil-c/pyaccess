@@ -53,15 +53,39 @@ def dynamic(obj: _T | None = None, *, reason: str | None = None):
     return _decorator
 
 
+class Public:
+    """Marker for ``Annotated[T, Public]`` visibility on module/class attributes.
+
+    Decorators (``@public``) can't be applied to plain variable assignments,
+    so annotated attributes use these marker classes as ``Annotated``
+    metadata instead — the same static-only, zero-runtime-effect philosophy
+    as ``typing.Final`` or PEP 702's ``@deprecated``.
+    """
+
+
+class Internal:
+    """Marker for ``Annotated[T, Internal]`` visibility on module/class attributes."""
+
+
+class Private:
+    """Marker for ``Annotated[T, Private]`` visibility on module/class attributes."""
+
+
 # ---------------------------------------------------------------------------
 # Static-analysis helpers (not part of the user-facing runtime API).
 # ---------------------------------------------------------------------------
 
-# Mapping from the simple decorator tail-name to a visibility level.
+# Mapping from the simple decorator tail-name to a visibility level. Includes
+# both the lower-case decorator identities (``@internal``) and the PascalCase
+# marker classes used inside ``typing.Annotated[T, Internal]`` for attributes
+# that can't carry a decorator (module/class-level variables).
 _VISIBILITY_BY_NAME = {
     "public": "public",
     "internal": "internal",
     "private": "private",
+    "Public": "public",
+    "Internal": "internal",
+    "Private": "private",
 }
 
 
