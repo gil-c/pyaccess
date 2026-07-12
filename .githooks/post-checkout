@@ -1,0 +1,67 @@
+#!/bin/sh
+# post-checkout hook: auto-create a venv when a new worktree is created
+#
+# Args: $1=prev HEAD, $2=new HEAD, $3=1 if branch checkout (vs file checkout)
+#
+# On Windows, Git waits for ALL child processes. We use PowerShell
+# Start-Process to launch setup fully detached from Git's process tree.
+# Progress is logged to .venv-setup.log.
+
+is_branch_checkout="$3"
+[ "$is_branch_checkout" != "1" ] && exit 0
+
+[ -d "venv" ] && exit 0
+
+# Find Python
+PYTHON=""
+for candidate in py python3 python; do
+    if "$candidate" --version >/dev/null 2>&1; then
+        PYTHON="$candidate"
+        break
+    fi
+done
+[ -z "$PYTHON" ] && exit 0
+
+# Get Windows-style path for PowerShell
+WIN_DIR="$(pwd -W 2>/dev/null || pwd)"
+
+# Write Python setup script
+cat > ".venv-setup.py" << 'PYEOF'
+import subprocess, sys, os, datetime
+
+wt = os.path.dirname(os.path.abspath(__file__))
+os.chdir(wt)
+log = open(".venv-setup.log", "w")
+
+def msg(m):
+    log.write(f"[{datetime.datetime.now()}] {m}\n")
+    log.flush()
+
+msg(f"Creating venv with {sys.executable}...")
+rc = subprocess.call([sys.executable, "-m", "venv", "venv"], stderr=log)
+if rc != 0 or not os.path.isdir("venv"):
+    msg("Failed to create venv")
+    sys.exit(1)
+
+pip = os.path.join("venv", "Scripts", "pip") if os.name == "nt" else os.path.join("venv", "bin", "pip")
+
+msg("Installing pyaccess editable (dev + lsp extras)...")
+rc = subprocess.call([pip, "install", "-e", ".[dev,lsp]"], stdout=log, stderr=log)
+if rc != 0:
+    rc = subprocess.call([pip, "install", "-e", "."], stdout=log, stderr=log)
+    msg(f"Fell back to plain editable install (rc={rc})")
+
+os.makedirs(".idea", exist_ok=True)
+v = f"{sys.version_info.major}.{sys.version_info.minor}"
+with open(os.path.join(".idea", "misc.xml"), "w") as f:
+    f.write(f'<?xml version="1.0" encoding="UTF-8"?>\n<project version="4">\n  <component name="ProjectRootManager" version="2" project-jdk-name="Python {v} (venv)" project-jdk-type="Python SDK" />\n</project>\n')
+msg(f"PyCharm configured for Python {v}")
+msg("Done")
+log.close()
+os.remove(__file__)
+PYEOF
+
+echo "Venv setup starting in background (see .venv-setup.log)..."
+
+# PowerShell Start-Process with Windows paths = fully detached from Git
+powershell.exe -NoProfile -Command "Start-Process -FilePath '$PYTHON' -ArgumentList '$WIN_DIR/.venv-setup.py' -WindowStyle Hidden" </dev/null >/dev/null 2>&1
