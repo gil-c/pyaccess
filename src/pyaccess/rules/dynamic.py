@@ -198,6 +198,22 @@ def _name_column(lines: list[str], lineno: int, name: str, after: int) -> int:
     return idx if idx != -1 else after
 
 
+def _leaf_symbol_and_column(lines: list[str], attr_node: ast.Attribute) -> tuple[str, int]:
+    """Column of an ``Attribute`` node's final segment, for underlining just the
+    offending name rather than the whole dotted chain.
+
+    E.g. for ``inspect.currentframe`` this returns ``("currentframe", <col of
+    'c'>)`` -- the harmless ``inspect`` module prefix is left unmarked, since it
+    is not itself the reason the diagnostic fires.
+    """
+    text = _span_text(lines, attr_node)
+    if text is not None:
+        idx = text.rfind(attr_node.attr)
+        if idx != -1:
+            return attr_node.attr, attr_node.col_offset + idx
+    return attr_node.attr, attr_node.col_offset
+
+
 def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: ARG001
     """Scan a single file's source for dynamic constructs.
 
@@ -291,12 +307,14 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
             ):
                 target = _positional_or_keyword(node, 0, "name")
                 if target is not None and not _is_literal_str(target):
+                    leaf_symbol, leaf_col = _leaf_symbol_and_column(source_lines, node.func)
                     emit(
                         PA012,
                         "'importlib.import_module()' is called with a non-literal "
                         "module name and cannot be statically resolved.",
                         node,
-                        symbol=func_name,
+                        symbol=leaf_symbol,
+                        column=leaf_col,
                     )
 
             elif simple_name == "__import__" and isinstance(node.func, ast.Name):
@@ -337,12 +355,14 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                 if (real_module == "inspect" and node.func.attr in ("currentframe", "stack", "trace")) or (
                     real_module == "sys" and node.func.attr == "_getframe"
                 ):
+                    leaf_symbol, leaf_col = _leaf_symbol_and_column(source_lines, node.func)
                     emit(
                         PA016,
                         f"'{func_name}()' inspects call-stack frames, which "
                         "escapes static analysis.",
                         node,
-                        symbol=func_name,
+                        symbol=leaf_symbol,
+                        column=leaf_col,
                     )
 
             elif isinstance(node.func, ast.Name):
@@ -426,13 +446,14 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                 elif isinstance(target, ast.Attribute):
                     base = _leftmost_name(target)
                     if base and base in imported_names and base not in ("self", "cls"):
+                        leaf_symbol, leaf_col = _leaf_symbol_and_column(source_lines, target)
                         emit(
                             PA017,
                             f"assigning to '{base}.{target.attr}' monkey-patches "
                             f"an attribute of the imported name '{base}'.",
                             node,
-                            column=target.col_offset,
-                            span_node=target,
+                            symbol=leaf_symbol,
+                            column=leaf_col,
                         )
 
         elif isinstance(node, ast.Delete):
