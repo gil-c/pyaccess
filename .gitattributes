@@ -1,0 +1,12 @@
+# Cross-platform line ending policy.
+# Keep repository text content normalized and predictable across Windows/Linux.
+* text=auto
+
+*.py   text eol=lf
+*.toml text eol=lf
+*.md   text eol=lf
+
+# Git hooks MUST use LF: their shebang (#!/bin/sh) breaks if Windows checks
+# them out with CRLF, and Git silently fails to invoke a hook whose first
+# line it can't parse as a valid interpreter path.
+.githooks/* text eol=lf

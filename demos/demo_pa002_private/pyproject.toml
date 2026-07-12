@@ -1,6 +1,0 @@
-[project]
-name = "demo_pa002_private"
-version = "0.0.1"
-requires-python = ">=3.10"
-dependencies = ["pyaccess"]
-
