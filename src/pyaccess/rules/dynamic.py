@@ -166,6 +166,54 @@ def _assignment_targets(node: ast.Assign | ast.AugAssign) -> list[ast.expr]:
     return node.targets if isinstance(node, ast.Assign) else [node.target]
 
 
+def _span_text(lines: list[str], node: ast.AST) -> str | None:
+    """Exact source text covered by ``node``, if it fits on a single line.
+
+    Used to widen an LSP diagnostic's underline to the full offending
+    expression (e.g. ``obj.__dict__.update``) instead of a single character.
+    Returns ``None`` for multi-line spans, where the caller falls back to the
+    default single-character underline (``Diagnostic`` only carries one
+    line number, so a cross-line range can't be represented anyway).
+    """
+    end_lineno = getattr(node, "end_lineno", None)
+    end_col = getattr(node, "end_col_offset", None)
+    lineno = getattr(node, "lineno", None)
+    col = getattr(node, "col_offset", None)
+    if None in (end_lineno, end_col, lineno, col) or end_lineno != lineno:
+        return None
+    if not (0 <= lineno - 1 < len(lines)):
+        return None
+    return lines[lineno - 1][col:end_col]
+
+
+def _name_column(lines: list[str], lineno: int, name: str, after: int) -> int:
+    """Column of ``name`` on ``lineno`` at/after ``after`` (e.g. past ``def ``).
+
+    Falls back to ``after`` if not found, so a diagnostic is never lost over a
+    cosmetic underline-width detail.
+    """
+    if not (0 <= lineno - 1 < len(lines)):
+        return after
+    idx = lines[lineno - 1].find(name, after)
+    return idx if idx != -1 else after
+
+
+def _leaf_symbol_and_column(lines: list[str], attr_node: ast.Attribute) -> tuple[str, int]:
+    """Column of an ``Attribute`` node's final segment, for underlining just the
+    offending name rather than the whole dotted chain.
+
+    E.g. for ``inspect.currentframe`` this returns ``("currentframe", <col of
+    'c'>)`` -- the harmless ``inspect`` module prefix is left unmarked, since it
+    is not itself the reason the diagnostic fires.
+    """
+    text = _span_text(lines, attr_node)
+    if text is not None:
+        idx = text.rfind(attr_node.attr)
+        if idx != -1:
+            return attr_node.attr, attr_node.col_offset + idx
+    return attr_node.attr, attr_node.col_offset
+
+
 def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: ARG001
     """Scan a single file's source for dynamic constructs.
 
@@ -186,6 +234,7 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
     imported_names = _collect_imported_names(tree)
     module_aliases = _collect_module_aliases(tree)
     from_aliases = _collect_from_aliases(tree)
+    source_lines = source.splitlines()
 
     def is_suppressed(lineno: int) -> bool:
         if lineno in allowed_lines:
@@ -194,18 +243,37 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
 
     diagnostics: list[Diagnostic] = []
 
-    def emit(code: str, message: str, node: ast.AST, *, severity: str = "error") -> None:
+    def emit(
+        code: str,
+        message: str,
+        node: ast.AST,
+        *,
+        severity: str = "error",
+        symbol: str | None = None,
+        column: int | None = None,
+        span_node: ast.AST | None = None,
+    ) -> None:
+        """Record a diagnostic anchored at ``node`` (or ``column`` if given).
+
+        ``symbol`` (or, if omitted, the source text spanned by ``span_node``)
+        tells the LSP layer how wide to make the underline -- otherwise it
+        would default to a single character, which is nearly invisible for
+        anything but the shortest identifiers.
+        """
         lineno = getattr(node, "lineno", 1)
         if is_suppressed(lineno):
             return
+        if symbol is None and span_node is not None:
+            symbol = _span_text(source_lines, span_node)
         diagnostics.append(
             Diagnostic(
                 code=code,
                 message=message,
                 file=file,
                 line=lineno,
-                column=getattr(node, "col_offset", 0),
+                column=column if column is not None else getattr(node, "col_offset", 0),
                 severity=severity,
+                symbol=symbol,
             )
         )
 
@@ -222,6 +290,7 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                         f"'{simple_name}()' is called with a non-literal attribute "
                         "name, which defeats static accessibility analysis.",
                         node,
+                        symbol=simple_name,
                     )
 
             elif simple_name in _EXEC_BUILTINS and isinstance(node.func, ast.Name):
@@ -230,6 +299,7 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                     f"'{simple_name}()' executes dynamically generated code and "
                     "cannot be statically analysed.",
                     node,
+                    symbol=simple_name,
                 )
 
             elif func_name == "importlib.import_module" or (
@@ -237,11 +307,14 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
             ):
                 target = _positional_or_keyword(node, 0, "name")
                 if target is not None and not _is_literal_str(target):
+                    leaf_symbol, leaf_col = _leaf_symbol_and_column(source_lines, node.func)
                     emit(
                         PA012,
                         "'importlib.import_module()' is called with a non-literal "
                         "module name and cannot be statically resolved.",
                         node,
+                        symbol=leaf_symbol,
+                        column=leaf_col,
                     )
 
             elif simple_name == "__import__" and isinstance(node.func, ast.Name):
@@ -252,6 +325,7 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                         "'__import__()' is called with a non-literal module name "
                         "and cannot be statically resolved.",
                         node,
+                        symbol=simple_name,
                     )
 
             elif isinstance(node.func, ast.Attribute) and _is_dunder_dict(node.func.value):
@@ -261,6 +335,7 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                         f"'.__dict__.{node.func.attr}()' mutates an object's "
                         "namespace directly, bypassing declared visibility.",
                         node,
+                        span_node=node.func,
                     )
 
             elif isinstance(node.func, ast.Attribute) and node.func.attr in _DICT_MUTATORS:
@@ -271,6 +346,7 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                         f"'{builtin_name}().{node.func.attr}()' mutates the "
                         "namespace dict directly, bypassing declared visibility.",
                         node,
+                        span_node=node.func,
                     )
 
             elif isinstance(node.func, ast.Attribute):
@@ -279,11 +355,14 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                 if (real_module == "inspect" and node.func.attr in ("currentframe", "stack", "trace")) or (
                     real_module == "sys" and node.func.attr == "_getframe"
                 ):
+                    leaf_symbol, leaf_col = _leaf_symbol_and_column(source_lines, node.func)
                     emit(
                         PA016,
                         f"'{func_name}()' inspects call-stack frames, which "
                         "escapes static analysis.",
                         node,
+                        symbol=leaf_symbol,
+                        column=leaf_col,
                     )
 
             elif isinstance(node.func, ast.Name):
@@ -299,6 +378,7 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                         f"'{node.func.id}()' inspects call-stack frames, which "
                         "escapes static analysis.",
                         node,
+                        symbol=node.func.id,
                     )
 
         elif isinstance(node, ast.Module):
@@ -307,11 +387,17 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                     "__getattr__",
                     "__getattribute__",
                 ):
+                    prefix_len = len("async def ") if isinstance(stmt, ast.AsyncFunctionDef) else len("def ")
+                    name_col = _name_column(
+                        source_lines, stmt.lineno, stmt.name, stmt.col_offset + prefix_len
+                    )
                     emit(
                         PA013,
                         f"module-level '{stmt.name}' intercepts attribute access "
                         "and cannot be statically analysed.",
                         stmt,
+                        symbol=stmt.name,
+                        column=name_col,
                     )
 
         elif isinstance(node, ast.ClassDef):
@@ -321,8 +407,9 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                         PA014,
                         f"class '{node.name}' declares an explicit metaclass, "
                         "which can rewrite the class body dynamically.",
-                        node,
+                        kw if getattr(kw, "lineno", None) else node,
                         severity="warning",
+                        symbol="metaclass",
                     )
 
         elif isinstance(node, (ast.Assign, ast.AugAssign)):
@@ -333,6 +420,8 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                         "subscript assignment into '__dict__' mutates an "
                         "object's namespace directly, bypassing declared visibility.",
                         node,
+                        column=target.col_offset,
+                        span_node=target,
                     )
                 elif isinstance(target, ast.Attribute) and target.attr == "__dict__":
                     emit(
@@ -340,6 +429,8 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                         "direct reassignment of '__dict__' replaces an "
                         "object's whole namespace, bypassing declared visibility.",
                         node,
+                        column=target.col_offset,
+                        span_node=target,
                     )
                 elif isinstance(target, ast.Subscript):
                     builtin_name = _namespace_builtin_call(target.value)
@@ -349,15 +440,20 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                             f"subscript assignment into '{builtin_name}()' mutates "
                             "the namespace dict directly, bypassing declared visibility.",
                             node,
+                            column=target.col_offset,
+                            span_node=target,
                         )
                 elif isinstance(target, ast.Attribute):
                     base = _leftmost_name(target)
                     if base and base in imported_names and base not in ("self", "cls"):
+                        leaf_symbol, leaf_col = _leaf_symbol_and_column(source_lines, target)
                         emit(
                             PA017,
                             f"assigning to '{base}.{target.attr}' monkey-patches "
                             f"an attribute of the imported name '{base}'.",
                             node,
+                            symbol=leaf_symbol,
+                            column=leaf_col,
                         )
 
         elif isinstance(node, ast.Delete):
@@ -370,6 +466,8 @@ def check(source: str, module: str, file: Path) -> list[Diagnostic]:  # noqa: AR
                             f"'del {builtin_name}()[...]' mutates the namespace "
                             "dict directly, bypassing declared visibility.",
                             node,
+                            column=target.col_offset,
+                            span_node=target,
                         )
 
     diagnostics.sort(key=lambda d: (d.line, d.column, d.code))
