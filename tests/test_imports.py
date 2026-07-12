@@ -45,6 +45,29 @@ def test_syntax_error_returns_empty():
     assert collect_imports("from x import (", module="m") == []
 
 
+def test_star_import_is_collected_with_imported_name_star():
+    source = "from pkg.other import *\n"
+    imps = collect_imports(source, module="pkg.mod")
+    assert len(imps) == 1
+    assert imps[0].imported_name == "*"
+    assert imps[0].from_module == "pkg.other"
+
+
+def test_relative_import_beyond_package_depth_is_dropped():
+    # `mod` is top-level (no dots); `from ...pkg import x` climbs further up
+    # than there are segments, so it cannot be resolved and must be skipped
+    # rather than raising or producing a bogus module name.
+    source = "from ...pkg import x\n"
+    assert collect_imports(source, module="mod") == []
+
+
+def test_relative_import_with_no_target_and_no_remaining_package_is_dropped():
+    # `from . import x` inside a top-level module has no parent package left
+    # to resolve against.
+    source = "from . import x\n"
+    assert collect_imports(source, module="top") == []
+
+
 def test_col_offset_points_at_imported_name_not_from_keyword():
     """Editors underline ``range start..end``; we want it on the symbol name."""
     source = "from pkg.other import helper\n"
