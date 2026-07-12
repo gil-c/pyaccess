@@ -5,6 +5,7 @@ Files outside any package are exposed as their stem (top-level modules).
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 
@@ -43,7 +44,22 @@ def package_of(module: str) -> str:
     return module.rsplit(".", 1)[0]
 
 
-def top_level_package(module: str) -> str:
-    """Return the top-level package name (first dotted segment)."""
+def top_level_package(module: str, roots: Sequence[str] = ()) -> str:
+    """Return the top-level package boundary used to scope ``@internal``.
+
+    Without ``roots`` this is just the first dotted segment — a heuristic
+    that breaks when the analysis root isn't the direct parent of the
+    packages (e.g. a ``src/`` layout scanned from the repo root, which would
+    otherwise collapse every package under a shared ``"src"`` segment).
+
+    When ``roots`` is given (``[tool.pyaccess] roots = [...]`` in config),
+    it's matched as the longest dotted prefix of ``module`` and returned
+    verbatim, so unrelated sibling packages under the same intermediate
+    directory stay properly separated.
+    """
+    if roots:
+        for root in sorted(roots, key=len, reverse=True):
+            if module == root or module.startswith(root + "."):
+                return root
     return module.split(".", 1)[0]
 

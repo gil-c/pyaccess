@@ -32,8 +32,8 @@ def check(
         symbol = target_symbols.get(imp.imported_name)
         if symbol is None or symbol.visibility is not Visibility.PRIVATE:
             continue
-        if imp.importer == imp.from_module:
-            continue  # same module: allowed (and shouldn't really happen on imports)
+        if imp.importer == symbol.module:
+            continue  # same module: allowed
         file = files_by_module.get(imp.importer)
         if file is None:
             continue
