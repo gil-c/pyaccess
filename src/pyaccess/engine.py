@@ -22,7 +22,9 @@ from pyaccess.modules import module_name_for
 from pyaccess.reexports import compute_reexports
 from pyaccess.rules import access as access_rule
 from pyaccess.rules import dynamic as dynamic_rule
+from pyaccess.rules import naming as naming_rule
 from pyaccess.rules import private as private_rule
+from pyaccess.suppression import filter_suppressed
 from pyaccess.symbols import Symbol, collect_symbols
 from pyaccess.usages import collect_usages
 
@@ -36,8 +38,13 @@ class ProjectIndex:
     modules_by_file: dict[Path, str] = field(default_factory=dict)
     symbols_by_module: dict[str, dict[str, Symbol]] = field(default_factory=dict)
     imports_by_module: dict[str, list[ImportRef]] = field(default_factory=dict)
-    # Per-file diagnostics from rules that only need one file's AST (PA01x).
+    # Live source text per module, kept around so inline
+    # ``# pyaccess: ignore`` comments can be resolved against the same
+    # content the diagnostics were computed from (see pyaccess.suppression).
+    sources_by_module: dict[str, str] = field(default_factory=dict)
+    # Per-file diagnostics from rules that only need one file's AST (PA01x, PA003).
     dynamic_diagnostics_by_module: dict[str, list[Diagnostic]] = field(default_factory=dict)
+    naming_diagnostics_by_module: dict[str, list[Diagnostic]] = field(default_factory=dict)
     # Visibility assumed for undecorated symbols (see pyaccess.config).
     default_visibility: Visibility = Visibility.PUBLIC
     # Explicit top-level package boundaries (see pyaccess.config / modules.top_level_package).
@@ -91,7 +98,6 @@ def build_index(root: Path, config: PyAccessConfig | None = None) -> ProjectInde
         roots=config.roots,
         disabled_rules=config.disabled_rules,
     )
-    sources_by_module: dict[str, str] = {}
     for file in discover_python_files(root):
         module = module_name_for(file, root)
         if module is None:
@@ -103,19 +109,20 @@ def build_index(root: Path, config: PyAccessConfig | None = None) -> ProjectInde
             source = file.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        sources_by_module[module] = source
+        index.sources_by_module[module] = source
         top_level, nested, imports = _parse_file(source, module, index.default_visibility)
         index.symbols_by_module[module] = top_level
         for class_qualname, members in nested.items():
             index.symbols_by_module[f"{module}.{class_qualname}"] = members
         index.imports_by_module[module] = imports
         index.dynamic_diagnostics_by_module[module] = dynamic_rule.check(source, module, file)
+        index.naming_diagnostics_by_module[module] = naming_rule.check(source, module, file)
 
     # Second pass: attribute-access usages (module-qualified access, class
     # members) need every module/class scope discovered above to resolve
     # against, so they run once the whole project has been parsed.
     known_scopes = set(index.symbols_by_module.keys())
-    for module, source in sources_by_module.items():
+    for module, source in index.sources_by_module.items():
         usage_refs = collect_usages(source, module, known_scopes)
         if usage_refs:
             index.imports_by_module[module].extend(usage_refs)
@@ -146,6 +153,7 @@ def _run_rules(
     symbols_by_module: Mapping[str, Mapping[str, Symbol]],
     files_by_module: Mapping[str, Path],
     dynamic_diagnostics_by_module: Mapping[str, list[Diagnostic]],
+    naming_diagnostics_by_module: Mapping[str, list[Diagnostic]],
     roots: tuple[str, ...] = (),
     disabled_rules: frozenset[str] = frozenset(),
 ) -> list[Diagnostic]:
@@ -153,6 +161,8 @@ def _run_rules(
     diagnostics.extend(access_rule.check(imports, symbols_by_module, files_by_module, roots))
     diagnostics.extend(private_rule.check(imports, symbols_by_module, files_by_module))
     for diags in dynamic_diagnostics_by_module.values():
+        diagnostics.extend(diags)
+    for diags in naming_diagnostics_by_module.values():
         diagnostics.extend(diags)
     if disabled_rules:
         diagnostics = [d for d in diagnostics if d.code not in disabled_rules]
@@ -168,14 +178,16 @@ def check_project(root: Path) -> list[Diagnostic]:
     combined_symbols = _with_reexports(
         index.symbols_by_module, index.imports_by_module, index.files_by_module
     )
-    return _run_rules(
+    diagnostics = _run_rules(
         all_imports,
         combined_symbols,
         index.files_by_module,
         index.dynamic_diagnostics_by_module,
+        index.naming_diagnostics_by_module,
         index.roots,
         index.disabled_rules,
     )
+    return filter_suppressed(diagnostics, index.sources_by_module, index.modules_by_file)
 
 
 def check_source(
@@ -214,7 +226,9 @@ def check_source(
     index.symbols_by_module[module] = top_level
     for class_qualname, members in nested.items():
         index.symbols_by_module[f"{module}.{class_qualname}"] = members
+    index.sources_by_module[module] = source
     index.dynamic_diagnostics_by_module[module] = dynamic_rule.check(source, module, file_path)
+    index.naming_diagnostics_by_module[module] = naming_rule.check(source, module, file_path)
 
     known_scopes = set(index.symbols_by_module.keys())
     imports.extend(collect_usages(source, module, known_scopes))
@@ -231,9 +245,11 @@ def check_source(
         combined_symbols,
         index.files_by_module,
         index.dynamic_diagnostics_by_module,
+        index.naming_diagnostics_by_module,
         index.roots,
         index.disabled_rules,
     )
+    diagnostics = filter_suppressed(diagnostics, index.sources_by_module, index.modules_by_file)
     return [d for d in diagnostics if d.file == file_path]
 
 

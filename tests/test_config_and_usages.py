@@ -94,10 +94,10 @@ def test_disabled_rules_config_suppresses_matching_diagnostics(tmp_path: Path):
     _write(
         tmp_path,
         "alpha/core.py",
-        "from pyaccess import internal\n@internal\ndef helper():\n    pass\n",
+        "from pyaccess import internal\n@internal\ndef _helper():\n    pass\n",
     )
     _write(tmp_path, "beta/__init__.py", "")
-    _write(tmp_path, "beta/user.py", "from alpha.core import helper\n")
+    _write(tmp_path, "beta/user.py", "from alpha.core import _helper\n")
 
     diagnostics = check_project(tmp_path)
     assert diagnostics == []
