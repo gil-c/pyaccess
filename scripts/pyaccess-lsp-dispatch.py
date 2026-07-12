@@ -10,9 +10,11 @@ This script solves that by being the thing that path points at (configure once,
 never touch it again). It contains no third-party dependencies (stdlib only) so
 it can run with any Python 3 interpreter, and at every launch it:
 
-1. Resolves the *current* project root -- LSP4IJ spawns the server process with
-   its cwd set to the project root, so ``os.getcwd()`` is normally enough. As a
-   safety net we also walk a few parent directories in case cwd is a
+1. Resolves the *current* project root -- preferring an explicit root passed
+   as ``argv[1]`` (PyCharm's ``$ProjectFileDir$`` macro, see Configure below)
+   since LSP4IJ's "Working directory" setting is not always honored
+   consistently and ``os.getcwd()`` alone proved unreliable in practice. As a
+   safety net we also walk a few parent directories in case the root is a
    subdirectory of the project (e.g. a nested source root).
 2. Looks for that project's OWN dedicated venv (``venv/Scripts/pyaccess-lsp.exe``
    on Windows, ``venv/bin/pyaccess-lsp`` elsewhere) and, if found, execs it
@@ -36,11 +38,13 @@ diagnostics and never even spawn a process for it.
 Configure once in PyCharm's LSP4IJ language server settings (Settings ->
 Languages & Frameworks -> Language Servers -> PyAccess -> Command):
 
-    py -3 D:\\Dev\\pyaccess\\scripts\\pyaccess-lsp-dispatch.py
+    py -3 D:\\Dev\\pyaccess\\scripts\\pyaccess-lsp-dispatch.py $ProjectFileDir$
 
 Point it at the MAIN checkout's copy of this script (not a worktree's), since
 the main checkout is never deleted, so the command line never needs updating
-again -- not even when worktrees are created or removed.
+again -- not even when worktrees are created or removed. The trailing
+``$ProjectFileDir$`` is a PyCharm macro expanded to whichever project window
+is currently starting the server; it is required (see point 1 above).
 """
 
 from __future__ import annotations
@@ -60,8 +64,12 @@ def _venv_lsp_executable(project_root: Path) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def _find_project_lsp_executable() -> Path | None:
-    root = Path.cwd()
+def _find_project_lsp_executable(explicit_root: str | None) -> Path | None:
+    # Prefer an explicit project root (passed as argv[1], typically PyCharm's
+    # $ProjectFileDir$ macro) over os.getcwd(): LSP4IJ's "Working directory"
+    # setting is not always honored consistently, so cwd alone is not
+    # reliable enough to locate the right worktree's venv.
+    root = Path(explicit_root) if explicit_root else Path.cwd()
     for _ in range(_MAX_PARENT_HOPS + 1):
         found = _venv_lsp_executable(root)
         if found is not None:
@@ -79,14 +87,17 @@ def _find_project_lsp_executable() -> Path | None:
 
 
 def main() -> int:
-    executable = _find_project_lsp_executable()
+    # argv[1], when present, is the project root (PyCharm's $ProjectFileDir$
+    # macro, configured as an extra "argument" alongside the interpreter and
+    # this script). It is consumed here, not forwarded to the child process.
+    explicit_root = sys.argv[1] if len(sys.argv) > 1 else None
+    executable = _find_project_lsp_executable(explicit_root)
     if executable is None:
         # No venv for this project (not built yet, or an unrelated repo that
         # never opted in): exit quietly, no server, no diagnostics.
         return 0
 
-    argv = [str(executable), *sys.argv[1:]]
-    os.execv(str(executable), argv)
+    os.execv(str(executable), [str(executable)])
     return 0  # pragma: no cover - execv does not return on success
 
 
