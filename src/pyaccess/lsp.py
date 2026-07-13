@@ -37,6 +37,7 @@ import contextlib
 import importlib
 import logging
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -80,10 +81,12 @@ _RELOAD_ORDER_HINT = (
     "pyaccess.graph",
     "pyaccess.reexports",
     "pyaccess.config",
+    "pyaccess.suppression",
     "pyaccess.rules",
     "pyaccess.rules.access",
     "pyaccess.rules.private",
     "pyaccess.rules.dynamic",
+    "pyaccess.rules.naming",
     "pyaccess.engine",
 )
 
@@ -121,6 +124,102 @@ def _to_lsp_diagnostic(d: PADiagnostic) -> lsp.Diagnostic:
         code=d.code,
         source="pyaccess",
     )
+
+
+# Case-preserving flip used by the PA003 "switch visibility" quick fix --
+# keeps ``Public``/``Internal`` (the ``Annotated[T, ...]`` metadata spelling)
+# distinct from the lowercase decorator spelling.
+_FLIP = {"public": "internal", "internal": "public", "Public": "Internal", "Internal": "Public"}
+
+
+def _suppress_code_action(uri: str, d: PADiagnostic, lines: list[str]) -> lsp.CodeAction | None:
+    """A quick fix that appends/extends a ``# pyaccess: ignore[CODE]`` comment.
+
+    Returns ``None`` when the line already carries a directive that already
+    silences this diagnostic's code (nothing useful to offer).
+    """
+    from pyaccess.suppression import parse_ignore_directive
+
+    idx = max(d.line - 1, 0)
+    line_text = lines[idx] if 0 <= idx < len(lines) else ""
+    existing = parse_ignore_directive(line_text)
+    if existing is not None and (not existing or d.code in existing):
+        return None  # already suppressed (bare ignore, or this code listed)
+
+    if existing is not None:
+        codes = sorted(existing | {d.code})
+        match = re.search(r"#\s*pyaccess:\s*ignore(?:\[[A-Za-z0-9,\s]*\])?", line_text)
+        start, end = match.span()
+        new_text = f"# pyaccess: ignore[{','.join(codes)}]"
+    else:
+        start = end = len(line_text)
+        new_text = f"  # pyaccess: ignore[{d.code}]"
+
+    edit = lsp.TextEdit(
+        range=lsp.Range(
+            start=lsp.Position(line=idx, character=start),
+            end=lsp.Position(line=idx, character=end),
+        ),
+        new_text=new_text,
+    )
+    return lsp.CodeAction(
+        title=f"pyaccess: ignore {d.code} on this line",
+        kind=lsp.CodeActionKind.QuickFix,
+        diagnostics=[_to_lsp_diagnostic(d)],
+        edit=lsp.WorkspaceEdit(changes={uri: [edit]}),
+    )
+
+
+def _visibility_flip_actions(uri: str, d: PADiagnostic, lines: list[str]) -> list[lsp.CodeAction]:
+    """PA003-only quick fix: flip ``@public``/``Public`` <-> ``@internal``/``Internal``.
+
+    Anchored at ``d.column..d.column + len(d.symbol)`` (see ``rules.naming``),
+    with a safety check that the buffer still contains the expected text at
+    that exact span -- guards against a stale diagnostic being applied to a
+    buffer that has since drifted (e.g. another edit landed first).
+    """
+    if d.code != "PA003" or not d.symbol or d.symbol not in _FLIP:
+        return []
+    idx = max(d.line - 1, 0)
+    line_text = lines[idx] if 0 <= idx < len(lines) else ""
+    start, end = d.column, d.column + len(d.symbol)
+    if line_text[start:end] != d.symbol:
+        return []
+    replacement = _FLIP[d.symbol]
+    edit = lsp.TextEdit(
+        range=lsp.Range(
+            start=lsp.Position(line=idx, character=start),
+            end=lsp.Position(line=idx, character=end),
+        ),
+        new_text=replacement,
+    )
+    label = replacement if replacement[0].isupper() else f"@{replacement}"
+    return [
+        lsp.CodeAction(
+            title=f"pyaccess: change to {label}",
+            kind=lsp.CodeActionKind.QuickFix,
+            diagnostics=[_to_lsp_diagnostic(d)],
+            edit=lsp.WorkspaceEdit(changes={uri: [edit]}),
+        )
+    ]
+
+
+def code_actions_for_document(
+    uri: str, diagnostics: list[PADiagnostic], source: str
+) -> list[lsp.CodeAction]:
+    """All quick fixes applicable to ``diagnostics`` reported on ``source``.
+
+    Pure and server-independent so it can be unit-tested directly (see
+    ``tests/test_lsp.py``) without spinning up a real ``CodeActionParams``.
+    """
+    lines = source.splitlines()
+    actions: list[lsp.CodeAction] = []
+    for d in diagnostics:
+        suppress = _suppress_code_action(uri, d, lines)
+        if suppress is not None:
+            actions.append(suppress)
+        actions.extend(_visibility_flip_actions(uri, d, lines))
+    return actions
 
 
 def _project_opts_in(root: Path) -> bool:
@@ -400,6 +499,24 @@ def create_server(*, watch_rules: bool = True) -> PyAccessLanguageServer:
     def _on_save(ls: PyAccessLanguageServer, params: lsp.DidSaveTextDocumentParams) -> None:
         doc = ls.workspace.get_text_document(params.text_document.uri)
         ls.refresh_file(params.text_document.uri, doc.source)
+
+    @server.feature(
+        lsp.TEXT_DOCUMENT_CODE_ACTION,
+        lsp.CodeActionOptions(code_action_kinds=[lsp.CodeActionKind.QuickFix]),
+    )
+    def _on_code_action(
+        ls: PyAccessLanguageServer, params: lsp.CodeActionParams
+    ) -> list[lsp.CodeAction]:
+        uri = params.text_document.uri
+        path = _uri_to_path(uri).resolve()
+        index = ls.index_for_file(path)
+        if index is None:
+            return []
+        doc = ls.workspace.get_text_document(uri)
+        diagnostics = engine_mod.check_source(index, file_path=path, source=doc.source)
+        lo, hi = params.range.start.line, params.range.end.line
+        in_range = [d for d in diagnostics if lo <= max(d.line - 1, 0) <= hi]
+        return code_actions_for_document(uri, in_range, doc.source)
 
     return server
 

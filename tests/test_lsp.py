@@ -8,6 +8,7 @@ import pytest
 
 pytest.importorskip("pygls")
 pytest.importorskip("lsprotocol")
+from pyaccess import engine as engine_mod  # noqa: E402
 from pyaccess.diagnostics import Diagnostic as PADiagnostic  # noqa: E402
 from pyaccess.lsp import (  # noqa: E402
     _guess_root,
@@ -227,4 +228,91 @@ def test_rule_watcher_ignores_blocklisted_modules(tmp_path: Path):
 
     assert "pyaccess.lsp" in _RELOAD_BLOCKLIST
     assert "pyaccess.lsp" not in _watched_pyaccess_source_files()
+
+
+# ---------------------------------------------------------------------------
+# Quick fixes: "suppress on this line" (any rule) and "flip visibility"
+# (PA003 only). Exercised as pure functions against a fake ``uri`` and
+# in-memory source text -- no real CodeActionParams/server transport needed.
+# ---------------------------------------------------------------------------
+from pyaccess.lsp import (  # noqa: E402
+    _suppress_code_action,
+    _visibility_flip_actions,
+    code_actions_for_document,
+)
+
+
+def test_suppress_action_appends_new_ignore_comment(tmp_path: Path):
+    pad = PADiagnostic(code="PA001", message="boom", file=tmp_path / "x.py",
+                       line=1, column=0, symbol="helper")
+    lines = ["from alpha.core import helper"]
+    action = _suppress_code_action("file:///x.py", pad, lines)
+    edit = action.edit.changes["file:///x.py"][0]
+    assert edit.new_text == "  # pyaccess: ignore[PA001]"
+    assert edit.range.start.character == len(lines[0])
+def test_suppress_action_extends_existing_directive(tmp_path: Path):
+    pad = PADiagnostic(code="PA003", message="boom", file=tmp_path / "x.py",
+                       line=1, column=0, symbol="internal")
+    lines = ["@internal  # pyaccess: ignore[PA001]"]
+    action = _suppress_code_action("file:///x.py", pad, lines)
+    edit = action.edit.changes["file:///x.py"][0]
+    assert edit.new_text == "# pyaccess: ignore[PA001,PA003]"
+def test_suppress_action_returns_none_when_code_already_ignored(tmp_path: Path):
+    pad = PADiagnostic(code="PA001", message="boom", file=tmp_path / "x.py",
+                       line=1, column=0, symbol="helper")
+    lines = ["x  # pyaccess: ignore[PA001]"]
+    assert _suppress_code_action("file:///x.py", pad, lines) is None
+def test_suppress_action_returns_none_when_bare_ignore_present(tmp_path: Path):
+    pad = PADiagnostic(code="PA002", message="boom", file=tmp_path / "x.py",
+                       line=1, column=0, symbol="helper")
+    lines = ["x  # pyaccess: ignore"]
+    assert _suppress_code_action("file:///x.py", pad, lines) is None
+def test_visibility_flip_action_public_to_internal(tmp_path: Path):
+    pad = PADiagnostic(code="PA003", message="boom", file=tmp_path / "x.py",
+                       line=1, column=1, symbol="public")
+    lines = ["@public"]
+    actions = _visibility_flip_actions("file:///x.py", pad, lines)
+    assert len(actions) == 1
+    assert actions[0].title == "pyaccess: change to @internal"
+    edit = actions[0].edit.changes["file:///x.py"][0]
+    assert edit.new_text == "internal"
+    assert edit.range.start.character == 1
+    assert edit.range.end.character == 1 + len("public")
+def test_visibility_flip_action_annotated_metadata_preserves_case(tmp_path: Path):
+    pad = PADiagnostic(code="PA003", message="boom", file=tmp_path / "x.py",
+                       line=1, column=18, symbol="Internal")
+    lines = ["x: Annotated[int, Internal]"]
+    actions = _visibility_flip_actions("file:///x.py", pad, lines)
+    assert actions[0].title == "pyaccess: change to Public"
+def test_visibility_flip_action_skipped_for_non_pa003(tmp_path: Path):
+    pad = PADiagnostic(code="PA001", message="boom", file=tmp_path / "x.py",
+                       line=1, column=1, symbol="public")
+    assert _visibility_flip_actions("file:///x.py", pad, ["@public"]) == []
+def test_visibility_flip_action_guards_against_buffer_drift(tmp_path: Path):
+    pad = PADiagnostic(code="PA003", message="boom", file=tmp_path / "x.py",
+                       line=1, column=1, symbol="public")
+    # The buffer has since changed underneath the stale diagnostic's column.
+    lines = ["@something_else"]
+    assert _visibility_flip_actions("file:///x.py", pad, lines) == []
+def test_code_actions_for_document_combines_both_families(tmp_path: Path):
+    pad = PADiagnostic(code="PA003", message="boom", file=tmp_path / "x.py",
+                       line=1, column=1, symbol="public", severity="error")
+    source = "@public\ndef _secret(): ...\n"
+    actions = code_actions_for_document("file:///x.py", [pad], source)
+    titles = {a.title for a in actions}
+    assert "pyaccess: ignore PA003 on this line" in titles
+    assert "pyaccess: change to @internal" in titles
+def test_code_action_feature_is_registered(tmp_path: Path):
+    server = create_server(watch_rules=False)
+    assert "textDocument/codeAction" in server.protocol.fm.features
+def test_code_action_end_to_end_offers_suppress_and_flip(tmp_path: Path):
+    _write(tmp_path, "pyproject.toml", "[project]\nname='demo'\ndependencies=['pyaccess']\n")
+    mod = tmp_path / "mod.py"
+    mod.write_text("from pyaccess import public\n\n@public\ndef _secret():\n    pass\n")
+    server = create_server(watch_rules=False)
+    diagnostics = engine_mod.check_source(server.index_for_file(mod), file_path=mod, source=mod.read_text())
+    assert any(d.code == "PA003" for d in diagnostics)
+    actions = code_actions_for_document(mod.as_uri(), diagnostics, mod.read_text())
+    assert any(a.title == "pyaccess: change to @internal" for a in actions)
+
 

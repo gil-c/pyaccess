@@ -30,5 +30,40 @@ def helper(): ...     # only callable from within the same package
 def _secret(): ...    # only callable from within the same module
 ```
 
-The decorators are pure runtime identities. All enforcement is static.
+The decorators are pure runtime identities. All enforcement is static, and
+covers both `from X import Y` and later usage (`import pkg.mod` + qualified
+access, `Class.member`/`instance.member`).
+
+## Configuration
+
+`pyaccess.toml` (or `[tool.pyaccess]` in `pyproject.toml`):
+
+```toml
+default_visibility = "public"        # or "internal" for strict-by-default
+roots = ["src.pkgA", "src.pkgB"]      # explicit top-level package boundaries
+disabled_rules = ["PA010"]            # rule codes to skip
+```
+
+`roots` fixes ambiguous layouts (e.g. `src/`) where the first dotted
+segment alone can't tell packages apart — see `modules.top_level_package`.
+
+## Suppressing a single line
+
+Any diagnostic (cross-package PA001/PA002, PA01x, PA003…) can be silenced
+inline, without touching `disabled_rules`:
+
+```python
+from alpha.core import helper  # pyaccess: ignore[PA001]
+
+@public
+def _secret(): ...             # pyaccess: ignore  (silences every code on this line)
+```
+
+## PA003 — visibility vs. naming mismatch
+
+Flags a decorator/annotation that disagrees with the leading-underscore
+convention: `@public def _secret()` (error — the underscore says hidden,
+the decorator says public) and `@internal def helper()` (warning — no
+underscore, so it reads like public API). The LSP quick fix can flip the
+decorator to match, or suppress the line.
 
