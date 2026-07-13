@@ -169,9 +169,14 @@ def _run_rules(
     return diagnostics
 
 
-def check_project(root: Path) -> list[Diagnostic]:
-    """Run all enabled rules on the project rooted at ``root``."""
-    index = build_index(root)
+def check_project(root: Path, config: PyAccessConfig | None = None) -> list[Diagnostic]:
+    """Run all enabled rules on the project rooted at ``root``.
+
+    ``config`` may be supplied by the CLI (or tests) to override or bypass the
+    on-disk ``pyaccess.toml`` / ``pyproject.toml``.  When ``None`` the config
+    is loaded from disk as usual.
+    """
+    index = build_index(root, config=config)
     all_imports: list[ImportRef] = []
     for refs in index.imports_by_module.values():
         all_imports.extend(refs)
