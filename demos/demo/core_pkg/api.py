@@ -15,12 +15,18 @@ def stable_api(x: int) -> int:
     return _polish(x) + helper(x)
 
 
-@internal
+@internal  # pyaccess: ignore[PA003]
 def helper(x: int) -> int:
     """@internal — callable from any module *inside* this top-level package
     (``core_pkg``), but PyAccess raises **PA001** (see
     ``src/pyaccess/rules/access.py``) if a *different* top-level package
     imports it directly. See ``consumer_pkg/cross_package.py``.
+
+    Named without a leading underscore on purpose, to also serve as the
+    PA001 example above — that would normally trip **PA003** (naming vs.
+    visibility mismatch, see ``core_pkg/naming_mismatches.py``), so it is
+    silenced here with the generic inline suppression comment instead of
+    renaming it and losing the PA001 example.
     """
     return x * 2
 
@@ -35,11 +41,12 @@ def _polish(x: int) -> int:
     return x + 1
 
 
-@internal
+@internal  # pyaccess: ignore[PA003]
 class InternalRegistry:
     """@internal class — the same PA001 rule applies to classes as to
     functions: legal to use from ``core_pkg.sibling``, illegal from
-    ``consumer_pkg``.
+    ``consumer_pkg``. Suppressed for PA003 for the same reason as
+    ``helper`` above.
     """
 
     def __init__(self) -> None:
