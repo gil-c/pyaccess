@@ -1,8 +1,6 @@
 """Direct unit tests for rules/access.py and rules/private.py, exercising
 the defensive branches that check_project's normal flow can't reach (an
 import whose importer module has no entry in files_by_module)."""
-from dataclasses import replace
-
 from pyaccess.imports import ImportRef
 from pyaccess.markers import Visibility
 from pyaccess.rules import access as access_rule
