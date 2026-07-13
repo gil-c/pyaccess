@@ -1,5 +1,5 @@
 """Direct unit tests for pyaccess.usages (attribute-access resolution)."""
-from pyaccess.usages import collect_usages, _flatten_attribute
+from pyaccess.usages import _flatten_attribute, collect_usages
 
 
 def test_syntax_error_returns_empty():
