@@ -15,10 +15,15 @@ setting, per roadmap §4.1:
   the direct parent of the packages (e.g. a ``src/`` layout or a monorepo
   scanned from its top).
 * ``disabled_rules`` — rule codes (e.g. ``"PA010"``) to skip entirely.
+
+CLI overrides (via :func:`merge_cli_overrides`) take precedence over any
+file-based setting so that one-off runs (``--disable PA014``, CI invocations
+with a specific ``--default-visibility``) never require touching the project
+config.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 try:
@@ -90,3 +95,31 @@ def load_config(root: Path) -> PyAccessConfig:
         return _config_from_mapping(tool_section, source=pyproject)
 
     return PyAccessConfig()
+
+
+def merge_cli_overrides(
+    base: PyAccessConfig,
+    *,
+    default_visibility: str | None = None,
+    roots: list[str] | None = None,
+    disable: list[str] | None = None,
+) -> PyAccessConfig:
+    """Return a new config with CLI-supplied values merged over ``base``.
+
+    Only non-``None`` arguments override the corresponding field; absent
+    arguments leave the file-based (or default) value untouched.  Extra
+    disabled rules accumulate on top of those already in ``base``.
+    """
+    overrides: dict = {}
+    if default_visibility is not None:
+        if default_visibility not in _VALID_DEFAULTS:
+            raise ValueError(
+                f"--default-visibility must be one of {sorted(_VALID_DEFAULTS)!r}, "
+                f"got {default_visibility!r}."
+            )
+        overrides["default_visibility"] = _VALID_DEFAULTS[default_visibility]
+    if roots is not None:
+        overrides["roots"] = tuple(roots)
+    if disable:
+        overrides["disabled_rules"] = base.disabled_rules | frozenset(disable)
+    return replace(base, **overrides)

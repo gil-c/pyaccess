@@ -7,6 +7,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from pyaccess.config import load_config, merge_cli_overrides
 from pyaccess.diagnostics import Diagnostic
 from pyaccess.engine import check_project
 
@@ -22,6 +23,27 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("text", "json"),
         default="text",
         help="Output format (default: text).",
+    )
+    check.add_argument(
+        "--disable",
+        metavar="RULE",
+        action="append",
+        default=[],
+        help="Disable a rule for this run (e.g. --disable PA014). Repeatable.",
+    )
+    check.add_argument(
+        "--default-visibility",
+        choices=("public", "internal"),
+        default=None,
+        help="Override default_visibility for this run.",
+    )
+    check.add_argument(
+        "--root",
+        metavar="PKG",
+        action="append",
+        default=None,
+        dest="roots",
+        help="Override top-level package roots (e.g. --root src.pkgA). Repeatable.",
     )
     return parser
 
@@ -46,7 +68,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command == "check":
-        diagnostics = check_project(args.path)
+        base_config = load_config(args.path)
+        config = merge_cli_overrides(
+            base_config,
+            default_visibility=args.default_visibility,
+            roots=args.roots,
+            disable=args.disable,
+        )
+        diagnostics = check_project(args.path, config=config)
         if args.format == "json":
             print(_to_json(diagnostics))
         else:
