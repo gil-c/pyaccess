@@ -50,6 +50,8 @@ class ProjectIndex:
     # Explicit top-level package boundaries (see pyaccess.config / modules.top_level_package).
     roots: tuple[str, ...] = ()
     disabled_rules: frozenset[str] = field(default_factory=frozenset)
+    # Per-rule severity overrides from config (rule code → "error"/"warning"/"hint"/"none").
+    severity_overrides: dict[str, str] = field(default_factory=dict)
 
 
 def _index_symbols(
@@ -97,6 +99,7 @@ def build_index(root: Path, config: PyAccessConfig | None = None) -> ProjectInde
         default_visibility=config.default_visibility,
         roots=config.roots,
         disabled_rules=config.disabled_rules,
+        severity_overrides=config.severity,
     )
     for file in discover_python_files(root):
         module = module_name_for(file, root)
@@ -148,6 +151,31 @@ def _with_reexports(
     return combined
 
 
+def _apply_severity_overrides(
+    diagnostics: list[Diagnostic],
+    severity_overrides: dict[str, str],
+) -> list[Diagnostic]:
+    """Apply per-rule severity overrides from config.
+
+    Rules mapped to ``"none"`` are dropped (equivalent to ``disabled_rules``).
+    Other overrides replace the diagnostic's severity in-place (producing a new
+    frozen instance).
+    """
+    if not severity_overrides:
+        return diagnostics
+    result: list[Diagnostic] = []
+    for d in diagnostics:
+        level = severity_overrides.get(d.code)
+        if level is None:
+            result.append(d)
+        elif level == "none":
+            pass  # silenced
+        else:
+            from dataclasses import replace as dc_replace
+            result.append(dc_replace(d, severity=level))  # type: ignore[arg-type]
+    return result
+
+
 def _run_rules(
     imports: list[ImportRef],
     symbols_by_module: Mapping[str, Mapping[str, Symbol]],
@@ -156,6 +184,7 @@ def _run_rules(
     naming_diagnostics_by_module: Mapping[str, list[Diagnostic]],
     roots: tuple[str, ...] = (),
     disabled_rules: frozenset[str] = frozenset(),
+    severity_overrides: dict[str, str] | None = None,
 ) -> list[Diagnostic]:
     diagnostics: list[Diagnostic] = []
     diagnostics.extend(access_rule.check(imports, symbols_by_module, files_by_module, roots))
@@ -166,6 +195,8 @@ def _run_rules(
         diagnostics.extend(diags)
     if disabled_rules:
         diagnostics = [d for d in diagnostics if d.code not in disabled_rules]
+    if severity_overrides:
+        diagnostics = _apply_severity_overrides(diagnostics, severity_overrides)
     return diagnostics
 
 
@@ -191,6 +222,7 @@ def check_project(root: Path, config: PyAccessConfig | None = None) -> list[Diag
         index.naming_diagnostics_by_module,
         index.roots,
         index.disabled_rules,
+        index.severity_overrides,
     )
     return filter_suppressed(diagnostics, index.sources_by_module, index.modules_by_file)
 
@@ -253,8 +285,7 @@ def check_source(
         index.naming_diagnostics_by_module,
         index.roots,
         index.disabled_rules,
+        index.severity_overrides,
     )
     diagnostics = filter_suppressed(diagnostics, index.sources_by_module, index.modules_by_file)
     return [d for d in diagnostics if d.file == file_path]
-
-
