@@ -7,9 +7,12 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from pyaccess.baseline import filter_new, load_baseline, write_baseline
 from pyaccess.config import load_config, merge_cli_overrides
 from pyaccess.diagnostics import Diagnostic
 from pyaccess.engine import check_project
+
+_DEFAULT_BASELINE = "pyaccess-baseline.json"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -45,6 +48,26 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="roots",
         help="Override top-level package roots (e.g. --root src.pkgA). Repeatable.",
     )
+    check.add_argument(
+        "--write-baseline",
+        metavar="FILE",
+        nargs="?",
+        const=_DEFAULT_BASELINE,
+        default=None,
+        help=(
+            "Write current violations to a baseline file and exit 0. "
+            f"Defaults to {_DEFAULT_BASELINE!r} when no FILE is given."
+        ),
+    )
+    check.add_argument(
+        "--baseline",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Path to a baseline file produced by --write-baseline. "
+            "Only violations absent from the baseline are reported."
+        ),
+    )
     return parser
 
 
@@ -76,6 +99,34 @@ def main(argv: Sequence[str] | None = None) -> int:
             disable=args.disable,
         )
         diagnostics = check_project(args.path, config=config)
+
+        # --write-baseline: dump current violations and exit 0
+        if args.write_baseline is not None:
+            baseline_path = Path(args.write_baseline)
+            write_baseline(diagnostics, args.path, baseline_path)
+            print(
+                f"pyaccess: baseline written to {baseline_path} "
+                f"({len(diagnostics)} violation(s) recorded)."
+            )
+            return 0
+
+        # --baseline: filter out known violations
+        if args.baseline is not None:
+            baseline_path = Path(args.baseline)
+            if not baseline_path.is_file():
+                print(
+                    f"pyaccess: baseline file not found: {baseline_path}. "
+                    "Run --write-baseline first.",
+                    file=sys.stderr,
+                )
+                return 2
+            try:
+                baseline = load_baseline(baseline_path)
+            except (ValueError, KeyError) as exc:
+                print(f"pyaccess: {exc}", file=sys.stderr)
+                return 2
+            diagnostics = filter_new(diagnostics, args.path, baseline)
+
         if args.format == "json":
             print(_to_json(diagnostics))
         else:
