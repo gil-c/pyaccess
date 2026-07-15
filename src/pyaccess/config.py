@@ -15,6 +15,15 @@ setting, per roadmap §4.1:
   the direct parent of the packages (e.g. a ``src/`` layout or a monorepo
   scanned from its top).
 * ``disabled_rules`` — rule codes (e.g. ``"PA010"``) to skip entirely.
+* ``severity`` — per-rule severity overrides. Maps rule codes to one of
+  ``"error"`` (default), ``"warning"``, ``"hint"``, or ``"none"`` (silences
+  the rule, equivalent to adding it to ``disabled_rules``).
+
+  Example::
+
+      [tool.pyaccess.severity]
+      PA017 = "warning"
+      PA003 = "hint"
 
 CLI overrides (via :func:`merge_cli_overrides`) take precedence over any
 file-based setting so that one-off runs (``--disable PA014``, CI invocations
@@ -35,6 +44,7 @@ from pyaccess.markers import Visibility
 
 _DEFAULT_VISIBILITY = Visibility.PUBLIC
 _VALID_DEFAULTS = {"public": Visibility.PUBLIC, "internal": Visibility.INTERNAL}
+_VALID_SEVERITIES = {"error", "warning", "hint", "none"}
 
 
 @dataclass(frozen=True)
@@ -42,6 +52,8 @@ class PyAccessConfig:
     default_visibility: Visibility = _DEFAULT_VISIBILITY
     roots: tuple[str, ...] = ()
     disabled_rules: frozenset[str] = field(default_factory=frozenset)
+    # Maps rule codes to severity overrides. "none" silences the rule.
+    severity: dict[str, str] = field(default_factory=dict)
 
 
 def _parse_default_visibility(raw: object, *, source: Path) -> Visibility:
@@ -63,6 +75,29 @@ def _parse_str_list(raw: object, *, key: str, source: Path) -> tuple[str, ...]:
     return tuple(raw)
 
 
+def _parse_severity(raw: object, *, source: Path) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"{source}: 'severity' must be a table mapping rule codes to severity "
+            f"levels, got {raw!r}."
+        )
+    result: dict[str, str] = {}
+    for code, level in raw.items():
+        if not isinstance(code, str):
+            raise ValueError(
+                f"{source}: 'severity' keys must be strings (rule codes), got {code!r}."
+            )
+        if not isinstance(level, str) or level not in _VALID_SEVERITIES:
+            raise ValueError(
+                f"{source}: 'severity[{code}]' must be one of "
+                f"{sorted(_VALID_SEVERITIES)!r}, got {level!r}."
+            )
+        result[code] = level
+    return result
+
+
 def _config_from_mapping(data: dict, *, source: Path) -> PyAccessConfig:
     return PyAccessConfig(
         default_visibility=_parse_default_visibility(
@@ -72,6 +107,7 @@ def _config_from_mapping(data: dict, *, source: Path) -> PyAccessConfig:
         disabled_rules=frozenset(
             _parse_str_list(data.get("disabled_rules"), key="disabled_rules", source=source)
         ),
+        severity=_parse_severity(data.get("severity"), source=source),
     )
 
 
