@@ -10,6 +10,7 @@ from pathlib import Path
 from pyaccess.baseline import filter_new, load_baseline, write_baseline
 from pyaccess.config import load_config, merge_cli_overrides
 from pyaccess.diagnostics import Diagnostic
+from pyaccess.docs import get_rule, list_rules
 from pyaccess.engine import check_project
 
 _DEFAULT_BASELINE = "pyaccess-baseline.json"
@@ -68,6 +69,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "Only violations absent from the baseline are reported."
         ),
     )
+
+    explain = sub.add_parser(
+        "explain",
+        help="Show documentation for one or all rules.",
+    )
+    explain.add_argument(
+        "code",
+        nargs="?",
+        metavar="CODE",
+        help="Rule code to explain (e.g. PA017). Omit to list all rules.",
+    )
+
     return parser
 
 
@@ -138,8 +151,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(f"pyaccess: {len(diagnostics)} issue(s) found.")
         return 0 if not diagnostics else 1
 
+    if args.command == "explain":
+        return _handle_explain(args)
+
     parser.error(f"unknown command: {args.command}")
     return 2
+
+
+def _handle_explain(args: argparse.Namespace) -> int:
+    if args.code is None:
+        # List all rules with a one-line summary.
+        rules = list_rules()
+        width = max(len(r.code) for r in rules)
+        for r in rules:
+            sev = f"[{r.severity}]"
+            print(f"  {r.code:<{width}}  {sev:<9}  {r.title}")
+        print(f"\n  {len(rules)} rules. Run 'pyaccess explain <CODE>' for full details.")
+        return 0
+
+    rule = get_rule(args.code)
+    if rule is None:
+        print(f"pyaccess: unknown rule code {args.code!r}.", file=sys.stderr)
+        print("Run 'pyaccess explain' (no argument) to list all known rules.", file=sys.stderr)
+        return 2
+    print(rule.render())
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover
